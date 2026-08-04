@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/harshpaigude/Drive E/SMS Extractor /application_flutter_claude/Model_trainer/train_bilstm_ner.py", line 14, in <module>
+    import pandas as pd
+ModuleNotFoundError: No module named 'pandas'

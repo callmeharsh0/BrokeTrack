@@ -1,0 +1,599 @@
+import 'dart:io' show Platform; // Import for checking the OS
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Import for reading the clipboard
+import 'package:intl/intl.dart'; // For formatting dates
+// NEW: Import the notification listener package
+import 'package:notification_listener_service/notification_listener_service.dart';
+
+import 'database_helper.dart'; // Our SQL database
+import 'expense_model.dart'; // Our data blueprint
+// IMPORTANT: This file MUST use 'tflite_flutter_plus' to work on iOS
+import 'ml_service.dart'; // Our ML interpreter
+
+void main() async {
+  // This is required to make sure services (like ML) are ready before the app runs.
+  WidgetsFlutterBinding.ensureInitialized();
+  // We DO NOT need to initialize the notification service here.
+  // It's a system service that is always available to be called.
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'AI Expense Tracker',
+      theme: ThemeData(
+        primarySwatch: Colors.indigo,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+      ),
+      debugShowCheckedModeBanner: false,
+      home: const HomeScreen(),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final DatabaseHelper dbHelper = DatabaseHelper.instance;
+  final MlService mlService = MlService.instance;
+
+  bool _isLoading = true;
+  bool _isListenerEnabled = false; // Tracks if the user gave permission
+  List<Expense> _expenses = []; // This list will hold all data from the DB
+
+  // A list of app package names we want to listen to (you can add more)
+  final List<String> _targetApps = [
+    'com.google.android.apps.nbu.paisa.user', // GPay (India)
+    'net.one97.paytm', // PayTM
+    'com.phonepe.app', // PhonePe
+    'com.google.android.gm', // Gmail (for e-receipts)
+    'com.android.messaging', // Default SMS app
+    'com.google.android.apps.messaging', // Google Messages
+    'com.samsung.android.messaging', // Samsung Messages (added)
+    'zopsoft.com.zerofalls' // fake bank app for testing
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    setState(() { _isLoading = true; });
+    try {
+      print("🚀 === APP INITIALIZATION START ===");
+      
+      // 1. Load the ML model (both platforms)
+      print("📦 Loading ML model...");
+      await mlService.loadModel();
+      print("✅ ML model loaded");
+
+      if (Platform.isAndroid) {
+        print("🤖 Running on Android");
+        // 2. Check if we have notification permission
+        bool isEnabled = await NotificationListenerService.isPermissionGranted();
+        print("🔔 Notification permission granted: $isEnabled");
+        setState(() { _isListenerEnabled = isEnabled; });
+
+        if (isEnabled) {
+          // 3. Start listening for live notifications
+          _startNotificationListener();
+        } else {
+          print("⚠️ Notification permission NOT granted - user needs to enable it");
+        }
+      } else {
+        print("🍎 Running on iOS - using clipboard method");
+      }
+      
+      // 4. Load all old expenses from the database
+      print("💾 Loading expenses from database...");
+      await _refreshExpensesFromDb();
+      print("✅ Loaded ${_expenses.length} expenses");
+
+      print("🚀 === APP INITIALIZATION COMPLETE ===\n");
+    } catch (e) {
+      print("❌ ERROR on startup: $e");
+    } finally {
+      setState(() { _isLoading = false; });
+    }
+  }
+
+  // --- 1. Notification Listener Logic (Android) ---
+
+  void _startNotificationListener() {
+    print("🎧 ========================================");
+    print("🎧 STARTING NOTIFICATION LISTENER");
+    print("🎧 Listening for packages: $_targetApps");
+    print("🎧 ========================================\n");
+    
+    // This stream will now send us live events
+    NotificationListenerService.notificationsStream.listen((event) async {
+      // Log EVERYTHING
+      print("\n==========================================");
+      print("📱 NOTIFICATION RECEIVED AT ${DateTime.now().toString()}");
+      print("📦 Package: ${event.packageName}");
+      print("📌 Title: ${event.title}");
+      print("📝 Content: ${event.content}");
+      print("🔍 Has Title: ${event.title != null}");
+      print("🔍 Has Content: ${event.content != null}");
+      print("🎯 Is Target App: ${_targetApps.contains(event.packageName)}");
+      print("==========================================");
+      
+      if (event.packageName == null || (event.content == null && event.title == null)) {
+        print("❌ SKIPPED: No package or content\n");
+        return;
+      }
+      
+      if (_targetApps.contains(event.packageName)) {
+        print("✅ ✅ ✅ TARGET APP MATCHED! ✅ ✅ ✅");
+        print("--- PROCESSING NOTIFICATION ---");
+        
+        String fullText = "${event.title ?? ''} ${event.content ?? ''}";
+        print("📝 Full text to process: '$fullText'");
+        print("📏 Text length: ${fullText.length} characters\n");
+
+        print("🤖 Calling AI Model...");
+        Expense? newExpense = await _processSmsText(fullText, DateTime.now());
+
+        if (newExpense != null) {
+          print("💰 💰 💰 AI MODEL SUCCESS! 💰 💰 💰");
+          print("   Merchant: ${newExpense.title}");
+          print("   Amount: ₹${newExpense.amount}");
+          print("   Bank: ${newExpense.bankName}");
+          print("   Type: ${newExpense.type}");
+          
+          print("💾 Attempting to insert into database...");
+          bool inserted = await dbHelper.insertExpense(newExpense);
+          
+          if (inserted) {
+            print("✅ ✅ ✅ INSERTED TO DATABASE SUCCESSFULLY! ✅ ✅ ✅");
+            await _refreshExpensesFromDb();
+            print("🔄 UI refreshed - expense should now be visible\n");
+          } else {
+            print("⚠️ ⚠️ ⚠️ DUPLICATE FOUND - NOT INSERTED ⚠️ ⚠️ ⚠️");
+            print("This exact transaction already exists in the database\n");
+          }
+        } else {
+          print("❌ ❌ ❌ AI MODEL RETURNED NULL ❌ ❌ ❌");
+          print("No transaction detected in the text");
+          print("Possible reasons:");
+          print("  - Text doesn't match SMS pattern");
+          print("  - ML model couldn't extract merchant/amount");
+          print("  - Text format is different from training data\n");
+        }
+      } else {
+        print("⏭️ SKIPPED: Not a target app");
+        print("   To track this app, add '${event.packageName}' to _targetApps list\n");
+      }
+    }, onError: (error) {
+      print("❌ ❌ ❌ NOTIFICATION LISTENER ERROR ❌ ❌ ❌");
+      print("Error: $error\n");
+    });
+    
+    print("🎧 ✅ Listener is now ACTIVE and waiting for notifications...");
+    print("🎧 Send an SMS to test!\n");
+  }
+
+  // This function now just opens the settings page
+  Future<void> _requestNotificationPermission() async {
+    print("🔔 Opening notification permission settings...");
+    await NotificationListenerService.requestPermission();
+    
+    // After user returns from settings, check again
+    print("🔄 Checking permission status...");
+    bool isEnabled = await NotificationListenerService.isPermissionGranted();
+    print("🔔 Permission status: $isEnabled");
+    
+    setState(() { _isListenerEnabled = isEnabled; });
+
+    if (isEnabled) {
+      print("✅ Permission granted! Starting listener...");
+      _startNotificationListener(); // Start listening!
+    } else {
+      print("❌ Permission still not granted");
+    }
+  }
+
+  // --- 2. Reusable "Brain" & "Paste" Logic ---
+
+  // This is our reusable "brain" function for all platforms
+  Future<Expense?> _processSmsText(String smsBody, DateTime smsDate) async {
+    print("\n🧠 === PROCESSING SMS TEXT ===");
+    print("📝 Input: '$smsBody'");
+    print("📅 Date: $smsDate");
+    
+    print("🤖 Calling ML model predict()...");
+    PredictionResult result = mlService.predict(smsBody);
+    
+    print("🎯 ML Model Results:");
+    print("   Merchant: '${result.merchant}'");
+    print("   Amount: '${result.amount}'");
+    print("   Bank: '${result.bankName}'");
+    
+    String lowerCaseSms = smsBody.toLowerCase();
+
+    // Only proceed if the model found a merchant and amount
+    if (result.merchant.isNotEmpty && result.amount.isNotEmpty) {
+      print("✅ Both merchant and amount found - proceeding...");
+      
+      // --- B. Get Debit/Credit (The "Rulebook") ---
+      String transactionType = 'debit';
+      if (lowerCaseSms.contains('credited') || 
+          lowerCaseSms.contains('received') ||
+          lowerCaseSms.contains('added')) { // Added for wallets
+        transactionType = 'credit';
+      }
+      print("💳 Transaction type detected: $transactionType");
+
+      // --- C. Get Time (From parameter) ---
+      final DateTime receivedTime = smsDate;
+      
+      // Clean the amount string (e.g., "rs.250.00" -> "250.00")
+      final cleanAmount = result.amount.replaceAll(RegExp(r'[^0-9\.]'), '');
+      print("🧹 Cleaned amount: '$cleanAmount' (from '${result.amount}')");
+      
+      final double? amount = double.tryParse(cleanAmount);
+
+      if (amount == null) {
+        print("❌ Failed to parse amount as double\n");
+        return null; // Skip if amount is invalid
+      }
+
+      print("✅ Amount parsed successfully: ₹$amount");
+
+      // --- D. Combine All Data ---
+      final expense = Expense(
+        title: result.merchant,
+        amount: amount,
+        date: receivedTime,
+        category: "Uncategorized",
+        type: transactionType,
+        bankName: result.bankName.isEmpty ? "Unknown" : result.bankName,
+      );
+      
+      print("📦 Created Expense object:");
+      print("   $expense");
+      print("🧠 === PROCESSING COMPLETE ===\n");
+      
+      return expense;
+    } else {
+      print("❌ Missing required fields:");
+      if (result.merchant.isEmpty) print("   - Merchant is empty");
+      if (result.amount.isEmpty) print("   - Amount is empty");
+      print("🧠 === PROCESSING FAILED ===\n");
+    }
+    
+    return null; // No transaction found
+  }
+
+  // (iOS-ONLY) Reads from clipboard
+  Future<void> _pasteAndProcessSms() async {
+    print("\n📋 === PASTE FROM CLIPBOARD ===");
+    ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+    
+    if (data == null || data.text == null || data.text!.isEmpty) {
+      print("❌ Clipboard is empty");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Your clipboard is empty.')),
+        );
+      }
+      return;
+    }
+    
+    print("📝 Clipboard text: '${data.text}'");
+    Expense? newExpense = await _processSmsText(data.text!, DateTime.now());
+    
+    if (newExpense == null) {
+      print("❌ Could not find transaction in clipboard text");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not find a transaction in the pasted text.')),
+        );
+      }
+      return;
+    }
+    
+    print("✅ Transaction found! Showing dialog...");
+    // Show the confirmation/edit dialog, PRE-FILLED with AI data
+    _showExpenseDialog(expenseToEdit: newExpense);
+  }
+
+  // --- 3. Database and UI ---
+  Future<void> _refreshExpensesFromDb() async {
+    print("🔄 Refreshing expenses from database...");
+    final data = await dbHelper.getAllExpenses();
+    print("📊 Found ${data.length} expenses in database");
+    
+    // Make sure the widget is still in the tree before calling setState
+    if (mounted) {
+      setState(() { _expenses = data; });
+      print("✅ UI state updated with ${_expenses.length} expenses\n");
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('AI Expense Tracker'),
+        actions: [
+          // On iOS, show our "Paste" button
+          if (Platform.isIOS)
+            IconButton(
+              icon: const Icon(Icons.paste),
+              tooltip: 'Paste from Clipboard',
+              onPressed: _pasteAndProcessSms,
+            ),
+        ],
+      ),
+      body: _buildBody(), // Build the main body
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showExpenseDialog(), // Show blank dialog
+        tooltip: 'Add Manual Expense',
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+
+  // This new function decides WHAT to show in the body
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 20),
+            Text('Loading model...', style: TextStyle(fontSize: 16, color: Colors.grey)),
+          ],
+        ),
+      );
+    }
+
+    // (ANDROID-ONLY) If we are on Android and permission is not granted,
+    // show the "Enable" screen.
+    if (Platform.isAndroid && !_isListenerEnabled) {
+      return _buildPermissionScreen();
+    }
+
+    // Otherwise, show the expense list (for iOS and for Android with permission)
+    return _buildExpenseList();
+  }
+
+  // (ANDROID-ONLY) The screen to ask for permission
+  Widget _buildPermissionScreen() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.notifications_active, size: 100, color: Colors.indigo),
+            const SizedBox(height: 20),
+            const Text(
+              'Live Tracking is Off',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'To automatically track expenses from GPay, PayTM, and other apps, you must enable the Notification Service.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
+                textStyle: const TextStyle(fontSize: 18),
+              ),
+              onPressed: _requestNotificationPermission,
+              child: const Text('Enable Service'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // The UI for the Expense List
+  Widget _buildExpenseList() {
+    if (_expenses.isEmpty) {
+      return Center(
+        child: Text(
+          Platform.isAndroid
+              ? 'No expenses found yet.\nTransactions from GPay, PayTM, etc. will appear here.'
+              : 'No expenses found.\nPaste a transaction or add one manually.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 18, color: Colors.grey),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: _expenses.length,
+      itemBuilder: (context, index) {
+        final expense = _expenses[index];
+        final String formattedDate = DateFormat('MMM d, h:mm a').format(expense.date);
+        final Color amountColor = expense.type == 'debit' ? Colors.red : Colors.green;
+        final String amountPrefix = expense.type == 'debit' ? '-' : '+';
+
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          child: ListTile(
+            leading: CircleAvatar(
+              backgroundColor: amountColor.withOpacity(0.1),
+              child: Icon(
+                expense.type == 'debit' ? Icons.arrow_downward : Icons.arrow_upward,
+                color: amountColor,
+              ),
+            ),
+            title: Text(
+              expense.title,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              '${expense.bankName} • $formattedDate',
+              style: const TextStyle(color: Colors.grey),
+            ),
+            trailing: Text(
+              '$amountPrefix₹${expense.amount.toStringAsFixed(2)}',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: amountColor,
+                fontSize: 16,
+              ),
+            ),
+            onLongPress: () {
+              // TODO: Add a delete confirmation dialog
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  // The Smart Dialog for Adding/Editing
+  Future<void> _showExpenseDialog({Expense? expenseToEdit}) async {
+    print("\n📝 === SHOWING EXPENSE DIALOG ===");
+    if (expenseToEdit != null) {
+      print("✏️ Edit mode with expense: ${expenseToEdit.title}");
+    } else {
+      print("➕ Add new expense mode");
+    }
+    
+    // Pre-fill controllers if we are editing/confirming
+    final titleController = TextEditingController(text: expenseToEdit?.title);
+    final amountController = TextEditingController(text: expenseToEdit?.amount.toString());
+    final bankController = TextEditingController(text: expenseToEdit?.bankName);
+    
+    // Default to 'debit' if it's a new manual expense
+    String transactionType = expenseToEdit?.type ?? 'debit';
+    
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false, // User must tap a button
+      builder: (BuildContext context) {
+        // Use StatefulBuilder so the dialog can update its own state (for the radio buttons)
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text(expenseToEdit == null ? 'Add Manual Expense' : 'Confirm Pasted Expense'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    TextField(
+                      controller: titleController,
+                      decoration: const InputDecoration(labelText: 'Title / Merchant'),
+                    ),
+                    TextField(
+                      controller: amountController,
+                      decoration: const InputDecoration(labelText: 'Amount', prefixText: '₹'),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                    TextField(
+                      controller: bankController,
+                      decoration: const InputDecoration(labelText: 'Bank / Source (e.g., "Cash")'),
+                    ),
+                    // Radio buttons for Debit/Credit
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text('Expense', style: TextStyle(color: transactionType == 'debit' ? Colors.red : Colors.grey)),
+                        Radio<String>(
+                          value: 'debit',
+                          groupValue: transactionType,
+                          activeColor: Colors.red,
+                          onChanged: (value) {
+                            setDialogState(() { // This updates the dialog's state
+                              transactionType = value!;
+                            });
+                          },
+                        ),
+                        Text('Income', style: TextStyle(color: transactionType == 'credit' ? Colors.green : Colors.grey)),
+                        Radio<String>(
+                          value: 'credit',
+                          groupValue: transactionType,
+                          activeColor: Colors.green,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              transactionType = value!;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    // TODO: You could add a Date & Time Picker button here
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  child: const Text('Cancel'),
+                  onPressed: () {
+                    print("❌ Dialog cancelled");
+                    Navigator.of(context).pop();
+                  },
+                ),
+                ElevatedButton(
+                  child: const Text('Save'),
+                  onPressed: () async {
+                    final String title = titleController.text;
+                    final double? amount = double.tryParse(amountController.text);
+                    
+                    if (title.isNotEmpty && amount != null && amount > 0) {
+                      final newExpense = Expense(
+                        // Use the original date from the SMS/notification, or now() if it's a new manual entry
+                        date: expenseToEdit?.date ?? DateTime.now(),
+                        title: title,
+                        amount: amount,
+                        bankName: bankController.text.isEmpty 
+                                  ? (expenseToEdit?.bankName ?? "Cash") // Use "Cash" for new manual entries
+                                  : bankController.text,
+                        type: transactionType,
+                        category: "Uncategorized", // Default category
+                      );
+                      
+                      print("💾 Saving expense: $newExpense");
+                      
+                      // Save to DB & refresh
+                      bool inserted = await dbHelper.insertExpense(newExpense);
+                      if (inserted) {
+                        print("✅ Expense saved successfully");
+                      } else {
+                        print("⚠️ Expense was a duplicate");
+                      }
+                      
+                      _refreshExpensesFromDb();
+                      
+                      Navigator.of(context).pop();
+                    } else {
+                      print("❌ Invalid input - title: '$title', amount: $amount");
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Please enter a valid title and amount.'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}

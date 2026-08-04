@@ -1,0 +1,20 @@
+{
+  "csv_path": "Sms_dataset - Sheet1.csv",
+  "max_len": 75,
+  "embedding_dim": 128,
+  "lstm_units_1": 64,
+  "lstm_units_2": 32,
+  "dropout_rate": 0.3,
+  "spatial_dropout": 0.2,
+  "recurrent_dropout": 0.2,
+  "batch_size": 8,
+  "epochs": 100,
+  "learning_rate": 0.0005,
+  "patience": 20,
+  "test_size": 0.2,
+  "val_size": 0.1,
+  "class_weight_multiplier": 0.8,
+  "use_focal_loss": true,
+  "focal_gamma": 2.5,
+  "use_crf": false
+}

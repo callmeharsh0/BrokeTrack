@@ -1,0 +1,20 @@
+# BiLSTM NER Training Dependencies
+# Install with: pip install -r requirements_bilstm.txt
+
+# Core
+pandas>=1.5.0
+numpy>=1.23.0
+scikit-learn>=1.2.0
+
+# TensorFlow
+tensorflow>=2.13.0
+
+# CRF Layer Support (REQUIRED for BiLSTM-CRF)
+tensorflow-addons>=0.21.0
+
+# Visualization
+matplotlib>=3.6.0
+
+# Optional (for faster training)
+# tensorflow-metal  # For Mac M1/M2 GPU acceleration (uncomment if on Mac)
+# tensorflow-gpu    # For NVIDIA GPU (uncomment if you have CUDA)

@@ -1,0 +1,12 @@
+{
+  "idx2tag": {
+    "0": "<PAD>",
+    "1": "B-AMOUNT",
+    "2": "B-BANK",
+    "3": "B-MERCHANT",
+    "4": "I-AMOUNT",
+    "5": "I-BANK",
+    "6": "I-MERCHANT",
+    "7": "O"
+  }
+}
